@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#101010">
+<link rel="preconnect" href="https://yahooproxy.b864v27974.workers.dev" crossorigin>
+<title>ULTIMA ORA · SU / GIÙ</title>
+<style>
+html,body{margin:0;background:#101010;color:#e8e8e8;font-family:-apple-system,system-ui,sans-serif}
+#list{padding:calc(4px + env(safe-area-inset-top,0px)) 8px calc(6px + env(safe-area-inset-bottom,0px));font-size:10px;line-height:1.12;font-variant-numeric:tabular-nums;overflow-wrap:anywhere} #list .sc>div{min-width:0} #list .sc span{max-width:100%}
+#list .sc{font-weight:600}
+#list .sc .h,.h{display:none}
+#list .sc>div{margin:0 0 1px}
+.g{color:#3ddc84}.r{color:#ff5252}.n{color:#c4c4c4}.a{color:#ffb74d}
+#list .ti{color:#8a8a8a;font-size:9px}
+</style>
+</head>
+<body>
+<div id="list"></div>
+<script>
+// Solo il pannello «ULTIMA ORA»: stessi dati e stessi calcoli della versione completa, senza grafico né schede.
+const PROXY='https://yahooproxy.b864v27974.workers.dev';
+const SYMBOL='QQQ',INTERVAL='1m',FAST=12,SLOW=26,SIG=9,DLEN=90,DTH=1.1,REFRESH=10,SHOW=180,DELTA=5,HOUR=36e5;
+const DUR={'1m':6e4,'5m':3e5,'15m':9e5,'30m':18e5,'1h':36e5};
+const RANGE={'1m':'7d','5m':'5d','15m':'1mo','30m':'1mo','1h':'3mo'};
+const EXT={'5m':'1mo','15m':'60d','30m':'60d','1h':'1y'};
+
+function emaP(v,n){const k=2/(n+1),o=Array(v.length).fill(NaN);let p=NaN;for(let i=0;i<v.length;i++){if(!Number.isFinite(v[i]))continue;p=Number.isFinite(p)?v[i]*k+p*(1-k):v[i];o[i]=p}return o}
+
+// ---- calcolo: solo ciò che serve al pannello (incroci delle ultime 4 ore) ----
+// incroci delle 4 ore che finiscono alla candela j (solo dati fino a j: usabile anche per ricostruire il passato)
+function buildEV(out,j){
+ const EV={su:[],gi:[]};
+ for(let i=0;i<=j;i++){const o=out[i];if(!(o.gold||o.death)||o.time<out[j].time-4*HOUR)continue;
+  const dir=o.gold?1:-1,e=o.close,L=j-i,p=[0],ms=[0];let bb=0;
+  for(let q=i+1;q<=j;q++){p.push(dir*(out[q].close-e)/e*100);
+   bb=Math.max(bb,dir>0?(out[q].high-e)/e*100:(e-out[q].low)/e*100);ms.push(bb)}
+  let kp=L;while(kp>0&&!(ms[kp]>ms[kp-1]+1e-9))kp--;
+  if(ms[L]>0)EV[dir>0?'su':'gi'].push({age:out[j].time-o.time,mx:ms[L],ret:Math.max(0,ms[L]-p[L]),tp:L-kp})}   // mx = picco, ret = restituito, tp = candele dal picco
+ return EV}
+function AGG(a,win,half){let num=0,den=0,ne=0,n=0;for(const e of a){if(e.age>win)continue;const w=half?Math.pow(.5,e.age/half):1;num+=w*e.ret;den+=w*e.mx;ne+=w;n++}return{v:den>0?100*num/den:null,n,ne}}
+function calc(bars){
+ const cl=bars.map(b=>b.close),f=emaP(cl,FAST),sl=emaP(cl,SLOW),macd=f.map((v,i)=>v-sl[i]),sig=emaP(macd,SIG);
+ const out=bars.map((b,i)=>{const m=macd[i],sg=sig[i],pm=i?macd[i-1]:NaN,ps=i?sig[i-1]:NaN;
+  return {time:b.time,high:b.high,low:b.low,close:b.close,gold:i>0&&m>sg&&pm<=ps,death:i>0&&m<sg&&pm>=ps}});
+ out.ev=buildEV(out,out.length-1);return out}
+
+// ---- dati ----
+let urlOrder=[0,1,2],ctrl=null,runId=0,timer=null,lastData=[],msg='Caricamento…';
+async function getBars(symbol,interval,abortSignal,range,dur){
+ const path=`/v8/finance/chart/${encodeURIComponent(symbol)}?interval=${encodeURIComponent(interval)}&range=${range}`;
+ const urls=[PROXY+path,PROXY+'/?url='+encodeURIComponent('https://query1.finance.yahoo.com'+path),PROXY+'/?symbol='+encodeURIComponent(symbol)+'&interval='+interval+'&range='+range];
+ let lastErr;
+ for(const i of urlOrder){
+  const ac=new AbortController(),onAbort=()=>ac.abort(),to=setTimeout(()=>ac.abort(),10000);
+  abortSignal.addEventListener('abort',onAbort);
+  try{
+   const res=await fetch(urls[i],{cache:'no-store',signal:ac.signal});if(!res.ok)throw Error('HTTP '+res.status);
+   const data=await res.json();if(data?.chart?.error)throw Error(data.chart.error.description||'errore Yahoo');
+   const result=data?.chart?.result?.[0]||data?.result?.[0]||data;
+   const q=result?.indicators?.quote?.[0],ts=result?.timestamp;
+   if(!q||!ts)throw Error('Formato dati non riconosciuto');
+   const bars=[];
+   for(let k=0;k<ts.length;k++){
+    if(![q.open?.[k],q.high?.[k],q.low?.[k],q.close?.[k],ts[k]].every(Number.isFinite)||q.high[k]<q.low[k])continue;
+    bars.push({time:ts[k]*1000,open:q.open[k],high:q.high[k],low:q.low[k],close:q.close[k]});
+   }
+   bars.sort((a,b)=>a.time-b.time);for(let k=bars.length-1;k>0;k--)if(bars[k].time===bars[k-1].time)bars.splice(k,1);
+   // ultimo prezzo di Yahoo: aggiorna la candela in corso o crea quella nuova
+   const mt=result?.meta?.regularMarketTime*1000,mp=result?.meta?.regularMarketPrice;
+   if(bars.length&&Number.isFinite(mt)&&Number.isFinite(mp)&&dur){
+    const slot=Math.floor(mt/dur)*dur,last=bars[bars.length-1];
+    if(last.time===slot&&mt>=last.time){last.close=mp;last.high=Math.max(last.high,mp);last.low=Math.min(last.low,mp)}
+    else if(slot>last.time&&slot<=Date.now())bars.push({time:slot,open:mp,high:mp,low:mp,close:mp});
+   }
+   if(bars.length<10)throw Error('poche candele');
+   urlOrder=[i,...urlOrder.filter(x=>x!==i)];
+   return bars;
+  }catch(e){
+   if(abortSignal.aborted)throw e;
+   lastErr=e.name==='AbortError'?Error('nessuna risposta entro 10 secondi'):e;
+  }finally{clearTimeout(to);abortSignal.removeEventListener('abort',onAbort)}
+ }
+ throw lastErr||Error('Impossibile caricare i dati');
+}
+function checkGran(bars,dur){const d=[];for(let i=1;i<bars.length;i++)d.push(bars[i].time-bars[i-1].time);d.sort((a,b)=>a-b);const med=d[d.length>>1];
+ if(!(Math.abs(med-dur)<=dur*.01))throw Error('granularità dei dati diversa dal timeframe');}
+async function load(){
+ clearTimeout(timer);if(ctrl)ctrl.abort();
+ ctrl=new AbortController();const my=++runId,sg=ctrl.signal,t0=Date.now();
+ try{
+  const dur=DUR[INTERVAL],now=Date.now(),need=SLOW+SIG+DLEN;
+  const tryRange=async r=>{const x=await getBars(SYMBOL,INTERVAL,sg,r,dur);checkGran(x,dur);return x};
+  let bars=null,e1=null;
+  try{bars=await tryRange(RANGE[INTERVAL])}catch(e){if(sg.aborted)return;e1=e}
+  if(my!==runId)return;
+  let closed=bars?bars.filter(b=>b.time<=now):[];
+  if((!bars||closed.length<=need)&&EXT[INTERVAL]){
+   try{const b2=await tryRange(EXT[INTERVAL]);if(my!==runId)return;const c2=b2.filter(b=>b.time<=now);if(!bars||c2.length>closed.length){bars=b2;closed=c2}}
+   catch(e){if(sg.aborted)return;if(!bars)throw e1||e}
+  }
+  if(!bars)throw e1||Error('dati non disponibili');
+  if(closed.length<=need){lastData=[];msg='Dati insufficienti';renderList();return}
+  lastData=calc(closed);seedMinHistory(lastData);msg='';NEWDATA=true;if(!BF){BF=true;backfill(lastData)}renderList();
+ }catch(e){
+  if(sg.aborted)return;
+  if(!lastData.length)msg='Errore: '+(e?.message||e);
+  renderList();
+ }finally{if(my===runId){clearTimeout(timer);if(REFRESH>0)timer=setTimeout(load,Math.max(500,REFRESH*1000-(Date.now()-t0)))}}
+}
+
+
+const MIN_HISTORY=[]; let MIN_LAST_SAMPLE=0,NEWDATA=false,SAVE=false;const HIST={r1u:[],r1g:[],r3u:[],r3g:[]},LAST={},CNT={};
+for(const k in HIST)CNT[k]={up:0,down:0,flat:0,sw:0,prev:0};   // conteggi delle valutazioni (una per campione, ogni 10 s) e dei cambi aumenta↔diminuisce
+// ---- partenza immediata: memoria del browser + ricostruzione dalle candele ----
+const SKEY='macd_ultima_ora_v1',DAY=()=>new Date().toLocaleDateString('it-IT',{timeZone:'Europe/Rome'});let BF=false;
+function saveState(){try{localStorage.setItem(SKEY,JSON.stringify({v:1,day:DAY(),HIST,MIN_HISTORY,CNT,MIN_LAST_SAMPLE}))}catch(e){}}
+function loadState(){try{const o=JSON.parse(localStorage.getItem(SKEY)||'null');if(!o||o.v!==1)return;const cut=Date.now()-6*36e5,ok=x=>x&&Number.isFinite(x.t)&&x.t>cut&&x.t<=Date.now()+6e4;
+ for(const k in HIST)if(Array.isArray(o.HIST&&o.HIST[k]))HIST[k].push(...o.HIST[k].filter(ok));
+ if(Array.isArray(o.MIN_HISTORY))MIN_HISTORY.push(...o.MIN_HISTORY.filter(ok));
+ if(o.day===DAY())for(const k in CNT)if(o.CNT&&o.CNT[k])Object.assign(CNT[k],o.CNT[k]);                    // conteggi del giorno
+ if(Number.isFinite(o.MIN_LAST_SAMPLE))MIN_LAST_SAMPLE=o.MIN_LAST_SAMPLE}catch(e){}}
+// valori 1 h / 3 h «a quel momento» (solo candele fino a quel momento) per le ultime 10 candele chiuse: ogni punto è a 1 minuto, non a 10 s
+function seedMinHistory(out){
+ // Precarica i valori mancanti usando le candele storiche a 1 minuto di Yahoo.
+ // Sono stime storiche (non campioni reali ogni 10 secondi) e servono ad avere subito 10 righe.
+ if(MIN_HISTORY.length>=10||out.length<12)return;
+ const need=10-MIN_HISTORY.length,existing=MIN_HISTORY.length?MIN_HISTORY[0].t:Date.now();
+ const candidates=[];
+ for(let j=Math.max(1,out.length-need-2);j<out.length-1;j++){
+  const t=out[j].time+DUR[INTERVAL];if(t>=existing)continue;
+  const ev=buildEV(out,j),u=AGG(ev.su,4*HOUR,30*6e4).v,g=AGG(ev.gi,4*HOUR,30*6e4).v;
+  let side=null,value=null;if(u!=null&&g!=null){side=Math.abs(u-g)<1e-9?'PARI':u<g?'SU':'GIÙ';value=Math.min(u,g)}else if(u!=null){side='SU';value=u}else if(g!=null){side='GIÙ';value=g}
+  candidates.push({t,side,value,b:1});
+ }
+ const merged=[...candidates,...MIN_HISTORY].sort((a,b)=>a.t-b.t);
+ MIN_HISTORY.splice(0,MIN_HISTORY.length,...merged.slice(-600));
+}
+function backfill(out){const n=out.length,dur=DUR[INTERVAL],now=Date.now();
+ const lastT=HIST.r1u.length?HIST.r1u[HIST.r1u.length-1].t:0;if(now-lastT<=60e3)return;               // storico recente già presente: nessuna ricostruzione
+ for(let j=Math.max(0,n-11);j<=n-2;j++){const t=out[j].time+dur;if(t<=lastT||t>now)continue;
+  const EV=buildEV(out,j),o={r1u:AGG(EV.su,HOUR),r1g:AGG(EV.gi,HOUR),r3u:AGG(EV.su,3*HOUR),r3g:AGG(EV.gi,3*HOUR)};
+  for(const k in HIST)HIST[k].push({t,v:o[k].v,b:1})}
+ saveState()}
+// direzione dagli ultimi 10 campioni (primo → ultimo); stabile se |variazione| < 1 pp. Restituisce {msg} se non valutabile.
+function evalTrend(k){const N=10,T=1,S=HIST[k].slice(-N);
+ if(S.length<N)return{msg:'in raccolta '+S.length+'/'+N};
+ if(S.some(x=>x.v==null))return{msg:'dati insufficienti'};
+ let irr=false;for(let i=1;i<N;i++)if(S[i].t-S[i-1].t>20e3)irr=true;       // irr = campioni non tutti a 10 s (storico a 1 min o pausa): valutazione provvisoria
+ const span=S[N-1].t-S[0].t;if(span>45*6e4)return{msg:'dati troppo vecchi'};
+ const net=S[N-1].v-S[0].v;let ups=0,downs=0;for(let i=1;i<N;i++){const d=S[i].v-S[i-1].v;if(d>=0.005)ups++;else if(d<=-0.005)downs++}
+ const dir=Math.abs(net)<T?0:net>0?1:-1;return{net,dir,poco:dir!==0&&(dir>0?ups:downs)<6,irr,span}}
+const MS_MIN=8000,TOL_LO=7000,TOL_HI=13000;   // un campione solo per aggiornamento riuscito; ≥8 s tra due campioni; intervallo regolare = 7–13 s
+const f2=new Intl.NumberFormat('it-IT',{minimumFractionDigits:2,maximumFractionDigits:2});
+function renderList(){
+ const el=document.getElementById('list');
+ const dur=DUR[INTERVAL],f=x=>f2.format(Math.abs(x));
+ if(!lastData.length){el.innerHTML='<div class="ti">'+msg+'</div>';return}
+ let h='';
+ const EV=lastData.ev;
+ if(EV){
+  const HL=30*6e4,W3=3*HOUR,W4=4*HOUR,f1=new Intl.NumberFormat('it-IT',{maximumFractionDigits:1}),
+   // perso dal max = Σ w·restituito ÷ Σ w·picco: nessun tetto al 100%, peso ∝ picco; w=1 (finestra rigida) oppure 0,5^(età/mezza vita)
+   agg=AGG,
+   sfu=agg(EV.su,W4,HL),sgi=agg(EV.gi,W4,HL),r1u=agg(EV.su,HOUR),r1g=agg(EV.gi,HOUR),r3u=agg(EV.su,W3),r3g=agg(EV.gi,W3),
+   ls=sfu.v,lg=sgi.v,pc=x=>x==null?'–':f(x).replace(/,00$/,'')+'%',
+   dl=ls!=null&&lg!=null?lg-ls:null,low=sfu.ne<3||sgi.ne<3,
+   lato=(u,g)=>u==null||g==null?null:Math.abs(g-u)<1?'pari':g>u?'SU':'GIÙ',
+   vd=dl==null?(ls==null&&lg==null?'nessun incrocio con picco nelle ultime ore':ls!=null?'solo SU ha un picco':'solo GIÙ ha un picco'):Math.abs(dl)<1?'pari':dl>0?'SU tiene meglio':'GIÙ tiene meglio',
+   vc=dl==null?(ls!=null?'g':lg!=null?'r':'n'):Math.abs(dl)<1?'n':dl>0?'g':'r',
+   L0=lato(ls,lg),L1=lato(r1u.v,r1g.v),L3=lato(r3u.v,r3g.v),
+   conc=L0&&L1&&L3?(L0===L1&&L1===L3?['concordi: '+(L0==='pari'?'pari':L0+' regge meglio'),L0==='SU'?'g':L0==='GIÙ'?'r':'n']:['discordi: il quadro recente cambia rispetto al contesto','a']):['dati insufficienti','n'],
+   nn=x=>f1.format(x),
+   ta=(a,w)=>{let t=0,k=0;for(const e of a)if(e.age<=w){t+=e.tp;k++}return k?Math.round(t/k*dur/6e4):null},tu=ta(EV.su,HOUR),td=ta(EV.gi,HOUR),mm=x=>x==null?'–':x+' min';
+   // Campionamento: un campione per ogni aggiornamento riuscito (mai ripetuto da dati vecchi) e solo con dati recenti (ultima candela entro 2 timeframe)
+   const nowMin=Date.now(),lastBar=lastData.length?lastData[lastData.length-1].time:0,fresh=NEWDATA&&nowMin-lastBar<=2*dur;NEWDATA=false;
+   if(fresh&&nowMin-MIN_LAST_SAMPLE>=MS_MIN){
+    let side=null,value=null;
+    if(ls!=null&&lg!=null){if(Math.abs(ls-lg)<1e-9){side='PARI';value=ls}else if(ls<lg){side='SU';value=ls}else{side='GIÙ';value=lg}}
+    else if(ls!=null){side='SU';value=ls}else if(lg!=null){side='GIÙ';value=lg}
+    MIN_HISTORY.push({t:nowMin,side,value}); MIN_LAST_SAMPLE=nowMin;SAVE=true;if(MIN_HISTORY.length>600)MIN_HISTORY.splice(0,MIN_HISTORY.length-600);
+    // stesso campionamento per i quattro valori 1 h / 3 h (SU e GIÙ): serve a dire se salgono o scendono
+    for(const [k,o] of [['r1u',r1u],['r1g',r1g],['r3u',r3u],['r3g',r3g]]){const a=HIST[k];a.push({t:nowMin,v:o.v});if(a.length>600)a.splice(0,a.length-600);
+     const r=evalTrend(k);LAST[k]=r;if(r.dir!==undefined&&!r.irr){const c=CNT[k];if(r.dir>0)c.up++;else if(r.dir<0)c.down++;else c.flat++;if(r.dir!==0){if(c.prev!==0&&c.prev!==r.dir)c.sw++;c.prev=r.dir}}}
+   }
+   // indicatore di direzione: ultimi 10 campioni (uno ogni 10 s), primo → ultimo; stabile se |variazione| < 1 pp; descrive il valore, non è un segnale
+   const trend=k=>{const r=LAST[k]||evalTrend(k);if(r.msg)return '<span class="h">· '+r.msg+'</span>';
+    return '<span class="n">'+(r.dir>0?'▲ aumenta':r.dir<0?'▼ diminuisce':'= stabile')+' '+sp(r.net)+' pp</span>'+(r.irr?' <span class="h">(su '+(r.span>=12e4?Math.round(r.span/6e4)+' min':Math.round(r.span/1000)+' s')+', storico)</span>':'')+(r.poco?' <span class="a">(poco coerente)</span>':'')};
+   const cnt=(k,nm)=>{const c=CNT[k];return nm+' ▲ '+c.up+' · ▼ '+c.down+' · = '+c.flat+' <span class="h">(cambi '+c.sw+')</span>'};
+   if(SAVE){SAVE=false;saveState()}
+   const stale=!fresh&&lastData.length&&nowMin-lastBar>2*dur;
+   const curMin=MIN_HISTORY.length?MIN_HISTORY[MIN_HISTORY.length-1]:null,prevMin=MIN_HISTORY.length>1?MIN_HISTORY[MIN_HISTORY.length-2]:null;
+   const minFmt=x=>x==null?'Dati insufficienti':pc(x);
+   const tf=x=>x?new Date(x).toLocaleTimeString('it-IT',{timeZone:'Europe/Rome',hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'}):'–';
+   const minTime=tf,sp=d=>(Math.abs(d)<0.005?'':d>0?'+':'')+f2.format(Math.abs(d)<0.005?0:d);                 // variazione in punti percentuali, 2 decimali
+   const DIR=(d,T)=>d>=T?['▲ aumentato','n']:d<=-T?['▼ diminuito','n']:['= stabile','n'];                      // direzione neutra: non è un segnale LONG/SHORT
+   let minDelta=null,minTrend='invariato',minClass='n';
+   if(curMin&&prevMin&&curMin.value!=null&&prevMin.value!=null){minDelta=curMin.value-prevMin.value;minTrend=minDelta>=0.005?'in aumento':minDelta<=-0.005?'in diminuzione':'stabile'}
+   const minChange=minDelta!=null?sp(minDelta)+' punti %':'in attesa del prossimo confronto';
+   const gridCss='display:grid;gap:3px 5px;font-size:10px;line-height:1.15;font-variant-numeric:tabular-nums;margin-top:3px;align-items:center';
+   const minHistoryHtml=(()=>{
+    const rows=MIN_HISTORY.slice(-12);if(!rows.length)return '<div class="h">Storico variazione minimo: in attesa del primo campione'+(stale?' (dati non recenti: mercato fermo o dati non aggiornati, campionamento sospeso)':'')+'.</div>';
+    let out='<div class="h" style="margin-top:5px">Storico variazione del minimo · un campione ogni '+REFRESH+' s (dal più vecchio al più recente)</div>'
+     +'<div style="'+gridCss+';grid-template-columns:auto auto 1fr auto auto"><span class="h">Ora</span><span class="h">Minimo</span><span class="h" style="text-align:right">Variaz.</span><span class="h">Esito</span><span class="h" style="text-align:right">Δt</span>';
+    rows.forEach((r,i)=>{const idx=MIN_HISTORY.length-rows.length+i,prev=idx>0?MIN_HISTORY[idx-1]:null,tc=r.side==='SU'?'g':r.side==='GIÙ'?'r':'n';
+     let dts='—',dtc='n';if(prev){const g=r.t-prev.t;dts=Math.round(g/1000)+' s'+'';dtc=g<TOL_LO||g>TOL_HI?'a':'n'}
+     if(r.value==null){out+='<span>'+tf(r.t)+'</span><span class="n" style="grid-column:span 3">Dati insufficienti</span><span class="'+dtc+'" style="text-align:right">'+dts+'</span>';return}
+     let vs='—',es='primo valido',ec='h';
+     if(prev&&prev.value!=null){const d=r.value-prev.value,D=DIR(d,0.005);vs=sp(d)+' pp';es=D[0]+(prev.side!==r.side?' (lato cambiato)':'');ec=D[1]}
+     out+='<span style="white-space:nowrap">'+tf(r.t)+'</span><span style="min-width:0;overflow-wrap:anywhere"><span class="'+tc+'">'+r.side+' '+pc(r.value)+'</span> <span class="'+ec+'">'+vs+' '+es+'</span></span><span class="'+dtc+'" style="text-align:right;white-space:nowrap">'+dts+'</span>'});
+    return out+'</div><div class="h">Variazione = minimo del campione − minimo del campione precedente, in punti percentuali (pp). Δt = tempo reale tra i due campioni (atteso ≈ '+REFRESH+' s; ⚠ se fuori da '+TOL_LO/1000+'–'+TOL_HI/1000+' s). Mostrati gli ultimi 12 campioni.'+(stale?' <span class="a">Dati non recenti: campionamento sospeso.</span>':'')+'</div>'})();
+   // ---- Lotta media contro media: andamento degli ultimi 10 campioni del minimo (descrive la direzione del valore, non un segnale) ----
+   const lottaHtml=(()=>{
+    const N=10,T=1,H='<div class="h" style="margin-top:8px">Lotta media contro media · ultimi '+N+' campioni del minimo (uno ogni '+REFRESH+' s: '+(N-1)*REFRESH+' s tra il primo e l\'ultimo)</div>',S=MIN_HISTORY.slice(-N);
+    if(S.length<N)return H+'<div>Dati insufficienti <span class="h">(campioni raccolti '+S.length+'/'+N+')</span></div>';
+    if(S.some(x=>x.value==null))return H+'<div>Dati insufficienti <span class="h">(almeno un campione senza valore valido: nessuna valutazione)</span></div>';
+    let list='<div style="'+gridCss+';grid-template-columns:76px minmax(0,1fr) 42px"><span class="h">Ora</span><span class="h">Minimo</span><span class="h" style="text-align:right">Δt</span>',gmax=0;
+    S.forEach((r,k)=>{const g=k?r.t-S[k-1].t:null;if(g>gmax)gmax=g;
+     list+='<span style="white-space:nowrap">'+tf(r.t)+'</span><span style="min-width:0;overflow-wrap:anywhere" class="'+(r.side==='SU'?'g':r.side==='GIÙ'?'r':'n')+'">'+r.side+' '+pc(r.value)+'</span><span class="'+(g!=null&&(g<TOL_LO||g>TOL_HI)?'a':'n')+'" style="text-align:right;white-space:nowrap">'+(g==null?'—':Math.round(g/1000)+' s')+'</span>'});
+    list+='</div>';
+    const span=Math.round((S[N-1].t-S[0].t)/1000);
+    // Le interruzioni temporali non bloccano il calcolo: usa sempre i 10 valori disponibili e il tempo reale tra loro.
+    const v=S.map(x=>x.value),net=v[N-1]-v[0];let ups=0,downs=0,flats=0;
+    for(let k=1;k<N;k++){const d=v[k]-v[k-1];if(d>=0.005)ups++;else if(d<=-0.005)downs++;else flats++}
+    const xs=S.map(x=>(x.t-S[0].t)/1000),mx=xs.reduce((a,b)=>a+b,0)/N,my=v.reduce((a,b)=>a+b,0)/N;let sxx=0,sxy=0;for(let k=0;k<N;k++){sxx+=(xs[k]-mx)*(xs[k]-mx);sxy+=(xs[k]-mx)*(v[k]-my)}
+    const slope=sxx>0?sxy/sxx:0,rng=Math.max(...v)-Math.min(...v),same=S.every(x=>x.side===S[0].side),sides=[...new Set(S.map(x=>x.side))].join('/');
+    const dirTxt=Math.abs(net)<T?'Stabile':net>0?'In aumento':'In diminuzione',nv=net>0?ups:downs;
+    let coer,cc;
+    if(!same){coer='Non omogeneo: il lato del minimo è cambiato ('+sides+'), il confronto mescola lati diversi';cc='a'}
+    else if(Math.abs(net)<T){if(rng>=5){coer='Poco coerente: netto stabile ma oscillante (escursione '+f2.format(rng)+' pp)';cc='a'}else{coer='Coerente: valori vicini (escursione '+f2.format(rng)+' pp)';cc='n'}}
+    else if(nv>=6&&Math.sign(slope)===Math.sign(net)){coer='Coerente: '+nv+' passi su '+(N-1)+' nella stessa direzione e pendenza concorde';cc='n'}
+    else{coer='Poco coerente: la variazione tra primo e ultimo non è sostenuta dai campioni intermedi';cc='a'}
+    return H+list
+     +'<div>Primo → ultimo: <span class="n">'+pc(v[0])+' → '+pc(v[N-1])+'</span> = <span class="n">'+sp(net)+' pp</span> <span class="h">(in '+span+' s reali)</span></div>'
+     +'<div>Direzione: <span class="n">'+dirTxt+'</span> <span class="h">(stabile se |variazione| &lt; '+T+' pp)</span></div>'
+     +'<div>Coerenza nel tempo: <span class="'+cc+'">'+coer+'</span></div>'
+     +'<div class="h">Passi tra campioni consecutivi: ▲ '+ups+' · ▼ '+downs+' · = '+flats+' su '+(N-1)+' · pendenza '+(slope>=0?'+':'')+f2.format(slope*10)+' pp ogni 10 s</div>'
+     })();
+  h+='<div class="sc">'
+    +'<div>1 h: <span class="g">SU '+pc(r1u.v)+'</span> <span class="h">('+r1u.n+')</span> '+trend('r1u')+' · <span class="r">GIÙ '+pc(r1g.v)+'</span> <span class="h">('+r1g.n+')</span> '+trend('r1g')+'</div>'
+    
+    +'<div>3 h: <span class="g">SU '+pc(r3u.v)+'</span> <span class="h">('+r3u.n+')</span> '+trend('r3u')+' · <span class="r">GIÙ '+pc(r3g.v)+'</span> <span class="h">('+r3g.n+')</span> '+trend('r3g')+'</div>'
+    
+    +'<div class="h">▲/▼ = come cambia il valore tra il primo e l\'ultimo dei 10 campioni (circa 90 s, stabile sotto 1 pp). Il valore si muove anche perché la finestra scorre e arrivano nuovi dati: descrive il numero, non è un segnale LONG/SHORT. «Volte» = quante valutazioni (una ogni 10 s, con finestre che si sovrappongono) hanno detto aumenta ▲, diminuisce ▼ o stabile =; «cambi» = quante volte si è passati da aumenta a diminuisce o viceversa. Si salvano nel browser e continuano alla riapertura (i conteggi sono del giorno). All\'apertura gli ultimi punti sono ricostruiti dalle candele a 1 minuto («storico»): valutazione provvisoria, non conteggiata, finché non ci sono 10 campioni da 10 s.</div>'
+    +'<div>Confronto sfumata / 1 h / 3 h: <span class="'+conc[1]+'">'+conc[0]+'</span></div>'
+    
+   +'<div>MINIMO tra SU e GIÙ: <span class="'+(curMin&&curMin.side==='SU'?'g':curMin&&curMin.side==='GIÙ'?'r':'n')+'">'+(curMin&&curMin.side?curMin.side+' '+minFmt(curMin.value):'Dati insufficienti')+'</span> <span class="h">· aggiornato '+minTime(curMin&&curMin.t)+'</span></div>'
+   +'<div>Minimo precedente: <span class="n">'+(prevMin&&prevMin.side?prevMin.side+' '+minFmt(prevMin.value):'non ancora disponibile')+'</span> <span class="h">('+minTime(prevMin&&prevMin.t)+')</span></div>'
+   +'<div>Variazione del minimo: <span class="'+minClass+'">'+minChange+'</span> · <span class="'+minClass+'">'+minTrend+'</span> <span class="h">(un solo confronto, non una tendenza)</span></div>'
+   +minHistoryHtml
+   +lottaHtml
+   +'<div>tempo medio dal max: <span class="g">SU '+mm(tu)+'</span> · <span class="r">GIÙ '+mm(td)+'</span></div>'
+   +'<div style="margin-top:10px;padding-top:8px;border-top:1px solid #333;font-size:1.08em">ULTIMA ORA · perso dal max: <span class="g">SU '+pc(ls)+'</span> · <span class="r">GIÙ '+pc(lg)+'</span></div>'
+   +'<div class="'+vc+'" style="font-size:1.08em">→ '+vd+(dl!=null&&Math.abs(dl)>=1?' (più probabile che risalga)':'')+'</div>'
+    +'</div>'}
+ 
+ el.innerHTML=h}
+loadState();
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)load()});
+load();
+</script>
+</body>
+</html>
